@@ -13,12 +13,29 @@ import (
 	"time"
 )
 
+// ReleaseInfo represents the metadata of a release from the deployment API.
 type ReleaseInfo struct {
-	LastModifiedEpochMs int64  `json:"lastModifiedEpochMs"`
-	DownloadURL         string `json:"downloadUrl"`
-	SHA256              string `json:"sha256"`
+	// LastModifiedEpochMs is the timestamp (in milliseconds) when this release was last modified.
+	LastModifiedEpochMs int64 `json:"lastModifiedEpochMs"`
+	// DownloadURL is the relative or absolute URL to download the release.
+	DownloadURL string `json:"downloadUrl"`
+	// SHA256 is the SHA256 checksum of the release file.
+	SHA256 string `json:"sha256"`
 }
 
+// TimeInfo contains timing information for debugging time synchronization issues.
+type TimeInfo struct {
+	// ServerTime is the current time on the deployment server (Unix milliseconds).
+	ServerTime int64 `json:"serverTime"`
+	// LocalTime is the current local time (Unix milliseconds).
+	LocalTime int64 `json:"localTime"`
+	// AdjustedLocalTime is the local time adjusted by the server time offset.
+	AdjustedLocalTime int64 `json:"adjustedLocalTime"`
+	// TimeDiff is the difference between server and local time (Server - Local).
+	TimeDiff int64 `json:"timeDiff"`
+}
+
+// Updater provides automatic update checking and installation for applications.
 type Updater struct {
 	apiRoot          string
 	updateInterval   time.Duration
@@ -29,6 +46,9 @@ type Updater struct {
 	serverTimeOffset int64
 }
 
+// New creates a new Updater instance.
+//
+// The uuid and key are obtained from your deployment API project settings.
 func New(uuid, key string) *Updater {
 	return &Updater{
 		apiRoot:        "https://api.insights-api.top/deployment/",
@@ -39,16 +59,23 @@ func New(uuid, key string) *Updater {
 	}
 }
 
+// SetAPIRoot sets the base URL for the deployment API.
+// Default: "https://api.insights-api.top/deployment/"
 func (u *Updater) SetAPIRoot(apiRoot string) {
 	apiRoot = strings.TrimSuffix(apiRoot, "/api")
 	apiRoot = strings.TrimSuffix(apiRoot, "/")
 	u.apiRoot = apiRoot
 }
 
+// SetUpdateInterval sets how often to check for updates.
+// Default: 30 seconds
 func (u *Updater) SetUpdateInterval(interval time.Duration) {
 	u.updateInterval = interval
 }
 
+// Start begins the automatic update checker.
+// It first synchronizes time with the server, then starts checking for updates
+// in a background goroutine at the configured interval.
 func (u *Updater) Start() error {
 	if u.projectUUID == "" || u.projectKey == "" {
 		return fmt.Errorf("missing project UUID or key")
@@ -60,11 +87,14 @@ func (u *Updater) Start() error {
 	return nil
 }
 
+// Stop halts the update checker.
 func (u *Updater) Stop() {
 	u.running = false
 	close(u.stopChan)
 }
 
+// SyncTime synchronizes the local clock with the server clock.
+// This is called automatically by Start(), but can be called manually if needed.
 func (u *Updater) SyncTime() {
 	serverTime := u.GetServerTime()
 	if serverTime > 0 {
@@ -72,6 +102,8 @@ func (u *Updater) SyncTime() {
 	}
 }
 
+// GetServerTime retrieves the current time from the deployment API.
+// Returns Unix milliseconds, or 0 on error.
 func (u *Updater) GetServerTime() int64 {
 	resp, err := http.Get(u.apiRoot + "/api/public/time")
 	if err != nil {
@@ -88,25 +120,23 @@ func (u *Updater) GetServerTime() int64 {
 	return result.CurrentEpochMs
 }
 
+// GetLocalTime returns the current local time in Unix milliseconds.
 func (u *Updater) GetLocalTime() int64 {
 	return time.Now().UnixMilli()
 }
 
+// GetTimeDiff returns the time difference between server and local clock.
+// Positive value means server is ahead, negative means local is ahead.
 func (u *Updater) GetTimeDiff() int64 {
 	return u.serverTimeOffset
 }
 
+// GetAdjustedLocalTime returns the local time adjusted by the server time offset.
 func (u *Updater) GetAdjustedLocalTime() int64 {
 	return time.Now().UnixMilli() + u.serverTimeOffset
 }
 
-type TimeInfo struct {
-	ServerTime        int64 `json:"serverTime"`
-	LocalTime         int64 `json:"localTime"`
-	AdjustedLocalTime int64 `json:"adjustedLocalTime"`
-	TimeDiff          int64 `json:"timeDiff"`
-}
-
+// GetTimeInfo returns a struct containing all timing information useful for debugging.
 func (u *Updater) GetTimeInfo() TimeInfo {
 	return TimeInfo{
 		ServerTime:        u.GetServerTime(),
