@@ -1,3 +1,3 @@
-module github.com/insights-autodeployment/autoupdater
+module github.com/LucazPlays/AutoDeploymentLib-Go
 
 go 1.21

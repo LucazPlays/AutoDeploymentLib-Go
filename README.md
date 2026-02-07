@@ -5,7 +5,7 @@ A simple, standalone auto-updater for Go applications.
 ## Installation
 
 ```bash
-go get github.com/insights-autodeployment/autoupdater
+go get github.com/LucazPlays/AutoDeploymentLib-Go
 ```
 
 ## Usage
@@ -16,7 +16,7 @@ package main
 import (
 	"os"
 	"time"
-	"github.com/insights-autodeployment/autoupdater"
+	"github.com/LucazPlays/AutoDeploymentLib-Go"
 )
 
 func main() {

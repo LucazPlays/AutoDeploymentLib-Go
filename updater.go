@@ -20,12 +20,13 @@ type ReleaseInfo struct {
 }
 
 type Updater struct {
-	apiRoot        string
-	updateInterval time.Duration
-	projectUUID    string
-	projectKey     string
-	running        bool
-	stopChan       chan struct{}
+	apiRoot          string
+	updateInterval   time.Duration
+	projectUUID      string
+	projectKey       string
+	running          bool
+	stopChan         chan struct{}
+	serverTimeOffset int64
 }
 
 func New(uuid, key string) *Updater {
@@ -53,6 +54,7 @@ func (u *Updater) Start() error {
 		return fmt.Errorf("missing project UUID or key")
 	}
 
+	u.SyncTime()
 	u.running = true
 	go u.loop()
 	return nil
@@ -61,6 +63,57 @@ func (u *Updater) Start() error {
 func (u *Updater) Stop() {
 	u.running = false
 	close(u.stopChan)
+}
+
+func (u *Updater) SyncTime() {
+	serverTime := u.GetServerTime()
+	if serverTime > 0 {
+		u.serverTimeOffset = serverTime - time.Now().UnixMilli()
+	}
+}
+
+func (u *Updater) GetServerTime() int64 {
+	resp, err := http.Get(u.apiRoot + "/api/public/time")
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		CurrentEpochMs int64 `json:"currentEpochMs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0
+	}
+	return result.CurrentEpochMs
+}
+
+func (u *Updater) GetLocalTime() int64 {
+	return time.Now().UnixMilli()
+}
+
+func (u *Updater) GetTimeDiff() int64 {
+	return u.serverTimeOffset
+}
+
+func (u *Updater) GetAdjustedLocalTime() int64 {
+	return time.Now().UnixMilli() + u.serverTimeOffset
+}
+
+type TimeInfo struct {
+	ServerTime        int64 `json:"serverTime"`
+	LocalTime         int64 `json:"localTime"`
+	AdjustedLocalTime int64 `json:"adjustedLocalTime"`
+	TimeDiff          int64 `json:"timeDiff"`
+}
+
+func (u *Updater) GetTimeInfo() TimeInfo {
+	return TimeInfo{
+		ServerTime:        u.GetServerTime(),
+		LocalTime:         u.GetLocalTime(),
+		AdjustedLocalTime: u.GetAdjustedLocalTime(),
+		TimeDiff:          u.GetTimeDiff(),
+	}
 }
 
 func (u *Updater) loop() {
@@ -97,7 +150,10 @@ func (u *Updater) checkAndUpdate() {
 		return
 	}
 
-	if info.ModTime().UnixMilli() == release.LastModifiedEpochMs {
+	localMtime := info.ModTime().UnixMilli()
+	adjustedMtime := localMtime + u.serverTimeOffset
+
+	if adjustedMtime >= release.LastModifiedEpochMs {
 		return
 	}
 
@@ -130,6 +186,12 @@ func (u *Updater) checkAndUpdate() {
 	os.Remove(backupPath)
 	os.Rename(selfPath, backupPath)
 	os.Rename(tmpPath, selfPath)
+
+	os.Chmod(selfPath, 0755)
+
+	mtime := time.UnixMilli(release.LastModifiedEpochMs)
+	if err := os.Chtimes(selfPath, mtime, mtime); err != nil {
+	}
 
 	os.Exit(0)
 }
