@@ -175,15 +175,15 @@ func (u *Updater) checkAndUpdate() {
 		return
 	}
 
-	info, statErr := os.Stat(selfPath)
-	if statErr != nil {
+	// Compare SHA256 of the running binary against the release.
+	// This is immune to mtime drift, timezone issues, and chmod changes.
+	localHash, err := calculateSHA256(selfPath)
+	if err != nil {
 		return
 	}
 
-	localMtime := info.ModTime().UnixMilli()
-	adjustedMtime := localMtime + u.serverTimeOffset
-
-	if adjustedMtime >= release.LastModifiedEpochMs {
+	if strings.EqualFold(localHash, release.SHA256) {
+		// Already up to date — nothing to do.
 		return
 	}
 
@@ -218,10 +218,6 @@ func (u *Updater) checkAndUpdate() {
 	os.Rename(tmpPath, selfPath)
 
 	os.Chmod(selfPath, 0755)
-
-	mtime := time.UnixMilli(release.LastModifiedEpochMs)
-	if err := os.Chtimes(selfPath, mtime, mtime); err != nil {
-	}
 
 	os.Exit(0)
 }
