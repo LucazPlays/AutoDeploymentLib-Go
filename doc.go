@@ -43,6 +43,18 @@ Set custom update interval:
 
 	updater.SetUpdateInterval(60 * time.Second)
 
+Set custom download timeout (default: 10 minutes):
+
+	updater.SetDownloadTimeout(20 * time.Minute)
+
+Enable logging to see update progress and errors:
+
+	updater.SetLogger(log.Default())
+
+Check for updates immediately on start (instead of waiting for the first interval):
+
+	updater.SetCheckOnStart(true)
+
 # Time Synchronization
 
 The updater synchronizes with the server time to ensure consistent timestamp

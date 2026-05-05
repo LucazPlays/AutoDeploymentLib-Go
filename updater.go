@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,6 +22,8 @@ type ReleaseInfo struct {
 	DownloadURL string `json:"downloadUrl"`
 	// SHA256 is the SHA256 checksum of the release file.
 	SHA256 string `json:"sha256"`
+	// SizeBytes is the expected file size in bytes (optional, 0 if not provided by server).
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
 }
 
 // TimeInfo contains timing information for debugging time synchronization issues.
@@ -39,11 +42,14 @@ type TimeInfo struct {
 type Updater struct {
 	apiRoot          string
 	updateInterval   time.Duration
+	downloadTimeout  time.Duration
 	projectUUID      string
 	projectKey       string
 	running          bool
 	stopChan         chan struct{}
 	serverTimeOffset int64
+	logger           *log.Logger
+	checkOnStart     bool
 }
 
 // New creates a new Updater instance.
@@ -51,11 +57,12 @@ type Updater struct {
 // The uuid and key are obtained from your deployment API project settings.
 func New(uuid, key string) *Updater {
 	return &Updater{
-		apiRoot:        "https://api.insights-api.top/deployment/",
-		updateInterval: 30 * time.Second,
-		projectUUID:    uuid,
-		projectKey:     key,
-		stopChan:       make(chan struct{}),
+		apiRoot:         "https://api.insights-api.top/deployment/",
+		updateInterval:  30 * time.Second,
+		downloadTimeout: 10 * time.Minute,
+		projectUUID:     uuid,
+		projectKey:      key,
+		stopChan:        make(chan struct{}),
 	}
 }
 
@@ -71,6 +78,26 @@ func (u *Updater) SetAPIRoot(apiRoot string) {
 // Default: 30 seconds
 func (u *Updater) SetUpdateInterval(interval time.Duration) {
 	u.updateInterval = interval
+}
+
+// SetDownloadTimeout sets the HTTP timeout for binary downloads.
+// Default: 10 minutes. Increase for very large binaries on slow connections.
+func (u *Updater) SetDownloadTimeout(timeout time.Duration) {
+	u.downloadTimeout = timeout
+}
+
+// SetLogger sets an optional logger for update operations.
+// When set, the updater logs progress and errors during update checks.
+// Pass nil to disable logging (default).
+func (u *Updater) SetLogger(logger *log.Logger) {
+	u.logger = logger
+}
+
+// SetCheckOnStart enables an immediate update check when Start() is called,
+// instead of waiting for the first ticker interval.
+// Default: false
+func (u *Updater) SetCheckOnStart(enabled bool) {
+	u.checkOnStart = enabled
 }
 
 // Start begins the automatic update checker.
@@ -147,6 +174,10 @@ func (u *Updater) GetTimeInfo() TimeInfo {
 }
 
 func (u *Updater) loop() {
+	if u.checkOnStart {
+		u.checkAndUpdate()
+	}
+
 	ticker := time.NewTicker(u.updateInterval)
 	defer ticker.Stop()
 
@@ -163,15 +194,22 @@ func (u *Updater) loop() {
 func (u *Updater) checkAndUpdate() {
 	selfPath, err := os.Executable()
 	if err != nil {
+		u.logf("failed to determine executable path: %v", err)
 		return
 	}
 
+	// Clean up any leftover .download file from a previous failed attempt.
+	tmpPath := selfPath + ".download"
+	os.Remove(tmpPath)
+
 	release, err := u.fetchReleaseInfo()
 	if err != nil {
+		u.logf("failed to fetch release info: %v", err)
 		return
 	}
 
 	if release.SHA256 == "" {
+		u.logf("release has no SHA256 checksum, skipping")
 		return
 	}
 
@@ -179,6 +217,7 @@ func (u *Updater) checkAndUpdate() {
 	// This is immune to mtime drift, timezone issues, and chmod changes.
 	localHash, err := calculateSHA256(selfPath)
 	if err != nil {
+		u.logf("failed to hash local binary: %v", err)
 		return
 	}
 
@@ -187,38 +226,59 @@ func (u *Updater) checkAndUpdate() {
 		return
 	}
 
-	downloadURL := u.resolveURL(release.DownloadURL)
-	tmpPath := selfPath + ".download"
-	os.Remove(tmpPath)
+	u.logf("update available: local=%s, remote=%s", localHash, release.SHA256)
 
-	if err := u.download(downloadURL, tmpPath); err != nil {
+	downloadURL := u.resolveURL(release.DownloadURL)
+
+	if err := u.download(downloadURL, tmpPath, release.SizeBytes); err != nil {
+		u.logf("download failed: %v", err)
 		os.Remove(tmpPath)
 		return
 	}
 
 	sha256Hash, err := calculateSHA256(tmpPath)
 	if err != nil {
+		u.logf("failed to hash downloaded file: %v", err)
 		os.Remove(tmpPath)
 		return
 	}
 
 	if !strings.EqualFold(release.SHA256, sha256Hash) {
+		u.logf("SHA256 mismatch: expected %s, got %s", release.SHA256, sha256Hash)
 		os.Remove(tmpPath)
 		return
 	}
 
 	if !u.verify(sha256Hash) {
+		u.logf("server-side verification failed for SHA256 %s", sha256Hash)
 		os.Remove(tmpPath)
 		return
 	}
 
+	// Install the update: backup → rename → chmod.
 	backupPath := selfPath + ".bak"
 	os.Remove(backupPath)
-	os.Rename(selfPath, backupPath)
-	os.Rename(tmpPath, selfPath)
 
-	os.Chmod(selfPath, 0755)
+	if err := os.Rename(selfPath, backupPath); err != nil {
+		u.logf("backup rename failed (%s -> %s): %v", selfPath, backupPath, err)
+		os.Remove(tmpPath)
+		return
+	}
 
+	if err := os.Rename(tmpPath, selfPath); err != nil {
+		u.logf("install rename failed (%s -> %s): %v", tmpPath, selfPath, err)
+		// Attempt rollback.
+		if rbErr := os.Rename(backupPath, selfPath); rbErr != nil {
+			u.logf("rollback also failed (%s -> %s): %v", backupPath, selfPath, rbErr)
+		}
+		return
+	}
+
+	if err := os.Chmod(selfPath, 0755); err != nil {
+		u.logf("chmod 0755 failed (non-fatal): %v", err)
+	}
+
+	u.logf("update installed successfully, exiting for restart")
 	os.Exit(0)
 }
 
@@ -262,7 +322,7 @@ func (u *Updater) verify(sha256 string) bool {
 	return strings.Contains(string(body), `"ok":true`) || strings.Contains(string(body), `"ok": true`)
 }
 
-func (u *Updater) download(downloadURL, destPath string) error {
+func (u *Updater) download(downloadURL, destPath string, expectedSize int64) error {
 	req, err := http.NewRequest("GET", downloadURL, nil)
 	if err != nil {
 		return err
@@ -270,7 +330,7 @@ func (u *Updater) download(downloadURL, destPath string) error {
 	req.Header.Set("User-Agent", "AutoDeploymentUpdater/1.0")
 	req.Header.Set("X-Project-Key", u.projectKey)
 
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := &http.Client{Timeout: u.downloadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -287,7 +347,21 @@ func (u *Updater) download(downloadURL, destPath string) error {
 	}
 	defer file.Close()
 
-	io.Copy(file, resp.Body)
+	written, err := io.Copy(file, resp.Body)
+	if err != nil {
+		return fmt.Errorf("download write failed after %d bytes: %w", written, err)
+	}
+
+	// Validate against Content-Length header if present.
+	if resp.ContentLength > 0 && written != resp.ContentLength {
+		return fmt.Errorf("size mismatch (Content-Length): expected %d bytes, got %d", resp.ContentLength, written)
+	}
+
+	// Validate against release sizeBytes if present.
+	if expectedSize > 0 && written != expectedSize {
+		return fmt.Errorf("size mismatch (release): expected %d bytes, got %d", expectedSize, written)
+	}
+
 	return nil
 }
 
@@ -301,6 +375,13 @@ func (u *Updater) resolveURL(maybeRelative string) string {
 	return u.apiRoot + maybeRelative
 }
 
+// logf logs a formatted message if a logger is configured.
+func (u *Updater) logf(format string, args ...interface{}) {
+	if u.logger != nil {
+		u.logger.Printf("[autodeployment] "+format, args...)
+	}
+}
+
 func calculateSHA256(filePath string) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -309,6 +390,8 @@ func calculateSHA256(filePath string) (string, error) {
 	defer file.Close()
 
 	hash := sha256.New()
-	io.Copy(hash, file)
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("hash read failed: %w", err)
+	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
